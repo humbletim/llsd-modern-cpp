@@ -49,7 +49,7 @@ jobs:
       - name: Compile on Windows
         if: env.JOB_SHOULD_RUN == 'true' && runner.os == 'Windows'
         # /EHsc (exception handling), /std:c++17, /I. (include root), /Fet: (output file)
-        run: cl /EHsc /std:c++17 /I. test.cpp /Fet:test.exe
+        run: cl /EHsc /std:c++17 /I. test.cpp /Fetest.exe
         
       - name: Run test (Linux/macOS)
         if: env.JOB_SHOULD_RUN == 'true' && runner.os != 'Windows'
@@ -73,7 +73,7 @@ jobs:
           
   compare_results:
     name: Compare All Test Outputs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     needs: build_and_test
     # We must run this 'always()' so we can implement the catastrophic failure check
     if: always()
@@ -81,8 +81,10 @@ jobs:
     steps:
       - name: Install Utilities
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dos2unix
+          which dos2unix || {
+            sudo apt-get update
+            sudo apt-get install -y dos2unix
+          }
           
       - name: Download all artifacts
         uses: actions/download-artifact@v4

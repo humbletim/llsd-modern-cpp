@@ -15,6 +15,44 @@ void test_undef() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_round_trip() {
+    std::cout << "Testing Round Trip" << std::endl;
+
+    // 1. Create a complex Value object
+    auto original_map = std::make_unique<llsd_modern::Map>();
+    (*original_map)["integer"] = llsd_modern::Value(42);
+    (*original_map)["string"] = llsd_modern::Value(std::string("is the answer"));
+    (*original_map)["uri"] = llsd_modern::Value(llsd_modern::URI{"http://example.com"});
+    (*original_map)["binary"] = llsd_modern::Value(llsd_modern::Binary{{1, 2, 3}});
+    llsd_modern::Value original_val(std::move(original_map));
+
+    // 2. Format to JSON
+    std::string json_str = llsd_modern::format_json(original_val);
+
+    // 3. Parse from JSON
+    llsd_modern::Value parsed_val = llsd_modern::parse_json(json_str);
+
+    // 4. Format to Binary
+    std::stringstream binary_stream;
+    llsd_modern::format_binary(binary_stream, parsed_val);
+
+    // 5. Parse from Binary
+    llsd_modern::Value final_val = llsd_modern::parse_binary(binary_stream);
+
+    // 6. Compare
+    assert(std::holds_alternative<std::unique_ptr<llsd_modern::Map>>(final_val.data));
+    auto final_map = std::get<std::unique_ptr<llsd_modern::Map>>(final_val.data).get();
+    assert(final_map->size() == 4);
+    assert(std::get<std::int32_t>((*final_map)["integer"].data) == 42);
+    assert(std::get<std::string>((*final_map)["string"].data) == "is the answer");
+    // TODO: URI is not preserved, it's parsed as a string.
+    assert(std::get<std::string>((*final_map)["uri"].data) == "http://example.com");
+    assert(std::get<llsd_modern::Binary>((*final_map)["binary"].data).b == std::vector<std::uint8_t>({1, 2, 3}));
+
+
+    std::cout << "PASS" << std::endl;
+}
+
 void test_bool() {
     std::cout << "Testing Bool" << std::endl;
     std::stringstream ss;
@@ -168,6 +206,31 @@ void test_cow_and_sharing() {
     std::cout << "PASS" << std::endl;
 }
 
+void test_json_output() {
+    std::cout << "Testing JSON Output" << std::endl;
+    auto map = std::make_unique<llsd_modern::Map>();
+    (*map)["undef"] = llsd_modern::Value(llsd_modern::Undef{});
+    (*map)["true"] = llsd_modern::Value(true);
+    (*map)["false"] = llsd_modern::Value(false);
+    (*map)["integer"] = llsd_modern::Value(123);
+    (*map)["real"] = llsd_modern::Value(3.14);
+    (*map)["string"] = llsd_modern::Value(std::string("hello"));
+    (*map)["uri"] = llsd_modern::Value(llsd_modern::URI{"http://example.com"});
+    (*map)["binary"] = llsd_modern::Value(llsd_modern::Binary{{1, 2, 3}});
+
+    auto array = std::make_unique<llsd_modern::Array>();
+    array->push_back(llsd_modern::Value(1));
+    array->push_back(llsd_modern::Value(std::string("two")));
+    (*map)["array"] = llsd_modern::Value(std::move(array));
+
+    llsd_modern::Value val(std::move(map));
+    std::string json_str = llsd_modern::format_json(val);
+
+    std::string expected_json = "{\"array\":[1,\"two\"],\"binary\":\"data:base64,AQID\",\"false\":false,\"integer\":123,\"real\":3.14,\"string\":\"hello\",\"true\":true,\"undef\":null,\"uri\":\"http://example.com\"}";
+    assert(json_str == expected_json);
+    std::cout << "PASS" << std::endl;
+}
+
 
 int main() {
     test_undef();
@@ -180,6 +243,8 @@ int main() {
     test_map();
     test_array();
     test_cow_and_sharing();
+    test_json_output();
+    test_round_trip();
 
     return 0;
 }

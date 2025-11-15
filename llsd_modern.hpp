@@ -37,7 +37,7 @@
  */
 #pragma once
 
-#include <nlohmann/json.hpp>
+#include "nlohmann/json.hpp"
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -49,8 +49,15 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
+#include <regex>
 
 namespace llsd_modern {
+
+class Value;
+
+namespace detail {
+    void _format_binary_recurse(std::ostream& s, const Value& v);
+}
 
 class LLUUID {
 public:
@@ -74,6 +81,7 @@ public:
 
 private:
     std::array<std::uint8_t, 16> bytes_;
+    friend void detail::_format_binary_recurse(std::ostream& s, const Value& v);
 };
 
 class LLDate {
@@ -90,6 +98,7 @@ public:
 
 private:
     std::chrono::system_clock::time_point time_point_;
+    friend void detail::_format_binary_recurse(std::ostream& s, const Value& v);
 };
 
 class Value;
@@ -226,8 +235,47 @@ inline std::string read_string(std::istream& s) {
 
 // Forward declaration for the JSON formatter
 std::string format_json(const Value& v);
+void format_binary(std::ostream& s, const Value& v);
 
 namespace detail {
+
+// Helper to write a big-endian integer
+inline void write_i32_be(std::ostream& s, std::int32_t val) {
+    s.put((val >> 24) & 0xFF);
+    s.put((val >> 16) & 0xFF);
+    s.put((val >> 8) & 0xFF);
+    s.put(val & 0xFF);
+}
+
+// Helper to write a big-endian double
+inline void write_double_be(std::ostream& s, double val) {
+    union {
+        uint64_t i;
+        double d;
+    } u;
+    u.d = val;
+    for (int i = 7; i >= 0; --i) {
+        s.put((u.i >> (i * 8)) & 0xFF);
+    }
+}
+
+// Helper to write a little-endian double
+inline void write_double_le(std::ostream& s, double val) {
+    union {
+        uint64_t i;
+        double d;
+    } u;
+    u.d = val;
+    for (int i = 0; i < 8; ++i) {
+        s.put((u.i >> (i * 8)) & 0xFF);
+    }
+}
+
+inline void write_string(std::ostream& s, const std::string& str) {
+    write_i32_be(s, str.size());
+    s.write(str.data(), str.size());
+}
+
 // Helper for format_json
 nlohmann::json to_json(const Value& v) {
     return std::visit([](auto&& arg) -> nlohmann::json {
@@ -241,8 +289,8 @@ nlohmann::json to_json(const Value& v) {
         } else if constexpr (std::is_same_v<T, Binary>) {
             // JSON doesn't have a binary type, so we'll represent it as a base64 string
              static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-             std::string s;
-             s.reserve(((arg.b.size() + 2) / 3) * 4);
+             std::string s = "data:base64,";
+             s.reserve(s.length() + ((arg.b.size() + 2) / 3) * 4);
              for (int i = 0; i < arg.b.size(); i += 3) {
                  s += b64[arg.b[i] >> 2];
                  s += b64[((arg.b[i] & 0x3) << 4) | (i + 1 < arg.b.size() ? arg.b[i+1] >> 4 : 0)];
@@ -337,4 +385,152 @@ inline Value parse_binary(std::istream& s) {
             throw std::runtime_error("Invalid binary token");
     }
 }
+
+namespace detail {
+    inline void _format_binary_recurse(std::ostream& s, const Value& v) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, Undef>) {
+                s.put('!');
+            } else if constexpr (std::is_same_v<T, bool>) {
+                s.put(arg ? '1' : '0');
+            } else if constexpr (std::is_same_v<T, std::int32_t>) {
+                s.put('i');
+                write_i32_be(s, arg);
+            } else if constexpr (std::is_same_v<T, double>) {
+                s.put('r');
+                write_double_be(s, arg);
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                s.put('s');
+                write_string(s, arg);
+            } else if constexpr (std::is_same_v<T, LLUUID>) {
+                s.put('u');
+                s.write(reinterpret_cast<const char*>(arg.bytes_.data()), 16);
+            } else if constexpr (std::is_same_v<T, LLDate>) {
+                s.put('d');
+                auto duration = std::chrono::duration<double>(arg.time_point_.time_since_epoch());
+                write_double_le(s, duration.count());
+            } else if constexpr (std::is_same_v<T, URI>) {
+                s.put('l');
+                write_string(s, arg.s);
+            } else if constexpr (std::is_same_v<T, Binary>) {
+                s.put('b');
+                write_i32_be(s, arg.b.size());
+                s.write(reinterpret_cast<const char*>(arg.b.data()), arg.b.size());
+            } else if constexpr (std::is_same_v<T, std::unique_ptr<Array>>) {
+                s.put('[');
+                if (arg) {
+                    write_i32_be(s, arg->size());
+                    for (const auto& item : *arg) {
+                        _format_binary_recurse(s, item);
+                    }
+                } else {
+                    write_i32_be(s, 0);
+                }
+                s.put(']');
+            } else if constexpr (std::is_same_v<T, std::unique_ptr<Map>>) {
+                s.put('{');
+                if (arg) {
+                    write_i32_be(s, arg->size());
+                    for (const auto& [key, value] : *arg) {
+                        s.put('k');
+                        write_string(s, key);
+                        _format_binary_recurse(s, value);
+                    }
+                } else {
+                    write_i32_be(s, 0);
+                }
+                s.put('}');
+            }
+        }, v.data);
+    }
+} // namespace detail
+
+inline void format_binary(std::ostream& s, const Value& v) {
+    detail::_format_binary_recurse(s, v);
+}
+
+// Forward declaration for the JSON parser
+Value parse_json(const std::string& s);
+
+namespace detail {
+    // Helper to decode a base64 string
+    inline std::vector<std::uint8_t> from_base64(const std::string& s) {
+        static const std::string b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::vector<int> T(256, -1);
+        for (int i = 0; i < 64; i++) T[b64[i]] = i;
+
+        std::vector<std::uint8_t> out;
+        int val = 0, valb = -8;
+        for (char c : s) {
+            if (T[c] == -1) break;
+            val = (val << 6) + T[c];
+            valb += 6;
+            if (valb >= 0) {
+                out.push_back(val >> valb);
+                valb -= 8;
+            }
+        }
+        return out;
+    }
+
+    inline Value from_json(const nlohmann::json& j) {
+        if (j.is_null()) {
+            return Value(Undef{});
+        } else if (j.is_boolean()) {
+            return Value(j.get<bool>());
+        } else if (j.is_number_integer()) {
+            return Value(j.get<std::int32_t>());
+        } else if (j.is_number_float()) {
+            return Value(j.get<double>());
+        } else if (j.is_string()) {
+            const std::string s = j.get<std::string>();
+            // Try to match base64 binary
+            if (s.rfind("data:base64,", 0) == 0) {
+                return Value(Binary{from_base64(s.substr(12))});
+            }
+            // Try to match UUID
+            static const std::regex uuid_re("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+            if (std::regex_match(s, uuid_re)) {
+                std::string hex_str = s;
+                hex_str.erase(std::remove(hex_str.begin(), hex_str.end(), '-'), hex_str.end());
+                std::array<std::uint8_t, 16> bytes;
+                for(int i=0; i<16; ++i) {
+                    bytes[i] = std::stoi(hex_str.substr(i*2, 2), nullptr, 16);
+                }
+                return Value(LLUUID(bytes));
+            }
+            // Try to match Date
+            static const std::regex date_re("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$");
+            if (std::regex_match(s, date_re)) {
+                std::tm tm = {};
+                std::stringstream ss(s);
+                ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+                auto time_point = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                return Value(LLDate(time_point));
+            }
+            return Value(s);
+        } else if (j.is_array()) {
+            auto array = std::make_unique<Array>();
+            for (const auto& item : j) {
+                array->push_back(from_json(item));
+            }
+            return Value(std::move(array));
+        } else if (j.is_object()) {
+            auto map = std::make_unique<Map>();
+            for (auto it = j.begin(); it != j.end(); ++it) {
+                (*map)[it.key()] = from_json(it.value());
+            }
+            return Value(std::move(map));
+        }
+        throw std::runtime_error("Unknown JSON type");
+    }
+
+}
+
+inline Value parse_json(const std::string& s) {
+    nlohmann::json j = nlohmann::json::parse(s);
+    return detail::from_json(j);
+}
+
 } // namespace llsd_modern

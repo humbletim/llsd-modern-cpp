@@ -40,6 +40,7 @@
 #include "nlohmann/json.hpp"
 #include <array>
 #include <chrono>
+#include <ctime>
 #include <cstdint>
 #include <iomanip>
 #include <map>
@@ -463,11 +464,12 @@ namespace detail {
         std::vector<std::uint8_t> out;
         int val = 0, valb = -8;
         for (char c : s) {
-            if (T[c] == -1) break;
+            if (c == '=') break;
+            if (T[c] == -1) continue;
             val = (val << 6) + T[c];
             valb += 6;
             if (valb >= 0) {
-                out.push_back(val >> valb);
+                out.push_back(static_cast<std::uint8_t>((val >> valb) & 0xFF));
                 valb -= 8;
             }
         }
@@ -506,7 +508,7 @@ namespace detail {
                 std::tm tm = {};
                 std::stringstream ss(s);
                 ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
-                auto time_point = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+                auto time_point = std::chrono::system_clock::from_time_t(timegm(&tm));
                 return Value(LLDate(time_point));
             }
             return Value(s);

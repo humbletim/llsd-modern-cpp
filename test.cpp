@@ -6,6 +6,10 @@
 #include <map>
 #include "llsd_modern.hpp"
 
+#ifdef _WIN32
+  #define timegm(x) _mkgmtime(x)
+#endif
+
 // Helper function to create a specific time_point for testing
 std::chrono::system_clock::time_point create_test_date() {
     std::tm tm = {};

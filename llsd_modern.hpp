@@ -508,6 +508,9 @@ namespace detail {
                 std::tm tm = {};
                 std::stringstream ss(s);
                 ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+                #ifdef _WIN32
+                    static constexpr auto& timegm = _mkgmtime;
+                #endif
                 auto time_point = std::chrono::system_clock::from_time_t(timegm(&tm));
                 return Value(LLDate(time_point));
             }

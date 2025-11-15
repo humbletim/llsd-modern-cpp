@@ -22,45 +22,54 @@ on:
 jobs:
   build_and_test:
     name: Test on ${{ matrix.os }}
-    # This 'if' condition filters the matrix based on the workflow_dispatch inputs
-    if: ${{ (matrix.os == 'ubuntu-latest' && github.event.inputs.run_ubuntu) || (matrix.os == 'macos-latest' && github.event.inputs.run_macos) || (matrix.os == 'windows-latest' && github.event.inputs.run_windows) }}
+    # 'if' condition removed from job level. We will check at the step level.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false # We want all 3 to run even if one fails
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
+    # This env var *can* access the matrix context and will be used to gate steps
+    env:
+      JOB_SHOULD_RUN: ${{ (matrix.os == 'ubuntu-latest' && github.event.inputs.run_ubuntu) || (matrix.os == 'macos-latest' && github.event.inputs.run_macos) || (matrix.os == 'windows-latest' && github.event.inputs.run_windows) }}
+
     steps:
       - name: Checkout code
+        if: env.JOB_SHOULD_RUN == 'true'
         uses: actions/checkout@v4
 
       - name: Compile on Linux/macOS
-        if: runner.os != 'Windows'
+        if: env.JOB_SHOULD_RUN == 'true' && runner.os != 'Windows'
         run: clang++ test.cpp -o test -isystem . -std=c++17
         
       - name: Setup MSVC on Windows
-        if: runner.os == 'Windows'
+        if: env.JOB_SHOULD_RUN == 'true' && runner.os == 'Windows'
         uses: microsoft/setup-msvc-dev@v1
 
       - name: Compile on Windows
-        if: runner.os == 'Windows'
+        if: env.JOB_SHOULD_RUN == 'true' && runner.os == 'Windows'
         # /EHsc (exception handling), /std:c++17, /I. (include root), /Fet: (output file)
         run: cl /EHsc /std:c++17 /I. test.cpp /Fet:test.exe
         
       - name: Run test (Linux/macOS)
-        if: runner.os != 'Windows'
+        if: env.JOB_SHOULD_RUN == 'true' && runner.os != 'Windows'
         # Capture both stdout and stderr (for the std::cerr from the test)
         run: ./test > test-output.txt 2>&1
 
       - name: Run test (Windows)
-        if: runner.os == 'Windows'
+        if: env.JOB_SHOULD_RUN == 'true' && runner.os == 'Windows'
         run: .\test.exe > test-output.txt 2>&1
         
       - name: Upload test output artifact
+        if: env.JOB_SHOULD_RUN == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: test-output-${{ matrix.os }}
           path: test-output.txt
+      
+      - name: Report Skipped Job
+        if: env.JOB_SHOULD_RUN != 'true'
+        run: echo "Skipping test on ${{ matrix.os }} based on workflow inputs."
           
   compare_results:
     name: Compare All Test Outputs
@@ -86,27 +95,54 @@ jobs:
           echo "Collating artifacts..."
           cd artifacts
           
-          # Use find to locate files in their subdirs and move/rename them
-          [ -f test-output-ubuntu-latest/test-output.txt ] && mv test-output-ubuntu-latest/test-output.txt ubuntu.txt && echo "Found Ubuntu artifact"
-          [ -f test-output-macos-latest/test-output.txt ] && mv test-output-macos-latest/test-output.txt macos.txt && echo "Found macOS artifact"
-          [ -f test-output-windows-latest/test-output.txt ] && mv test-output-windows-latest/test-output.txt windows.txt && echo "Found Windows artifact"
+          FILE_COUNT=0
+          EXPECTED_COUNT=0
+          
+          if [[ "${{ github.event.inputs.run_ubuntu }}" == "true" ]]; then
+            EXPECTED_COUNT=$((EXPECTED_COUNT+1))
+            if [ -f test-output-ubuntu-latest/test-output.txt ]; then
+              mv test-output-ubuntu-latest/test-output.txt ubuntu.txt
+              echo "Found Ubuntu artifact"
+              FILE_COUNT=$((FILE_COUNT+1))
+            else
+              echo "::warning::Expected Ubuntu artifact but did not find it."
+            fi
+          fi
+          
+          if [[ "${{ github.event.inputs.run_macos }}" == "true" ]]; then
+            EXPECTED_COUNT=$((EXPECTED_COUNT+1))
+            if [ -f test-output-macos-latest/test-output.txt ]; then
+              mv test-output-macos-latest/test-output.txt macos.txt
+              echo "Found macOS artifact"
+              FILE_COUNT=$((FILE_COUNT+1))
+            else
+              echo "::warning::Expected macOS artifact but did not find it."
+            fi
+          fi
+          
+          if [[ "${{ github.event.inputs.run_windows }}" == "true" ]]; then
+            EXPECTED_COUNT=$((EXPECTED_COUNT+1))
+            if [ -f test-output-windows-latest/test-output.txt ]; then
+              mv test-output-windows-latest/test-output.txt windows.txt
+              echo "Found Windows artifact"
+              FILE_COUNT=$((FILE_COUNT+1))
+            else
+              echo "::warning::Expected Windows artifact but did not find it."
+            fi
+          fi
 
           # Normalize Windows line endings
           [ -f windows.txt ] && dos2unix windows.txt && echo "Normalized Windows EOL"
 
-          FILE_COUNT=0
-          [ -f ubuntu.txt ] && FILE_COUNT=$((FILE_COUNT+1))
-          [ -f macos.txt ] && FILE_COUNT=$((FILE_COUNT+1))
-          [ -f windows.txt ] && FILE_COUNT=$((FILE_COUNT+1))
-
           echo "files_found=$FILE_COUNT" >> $GITHUB_OUTPUT
+          echo "files_expected=$EXPECTED_COUNT" >> $GITHUB_OUTPUT
           
       - name: Catastrophic Failure Check
-        if: steps.collate.outputs.files_found != '3'
+        if: steps.collate.outputs.files_found != steps.collate.outputs.files_expected
         run: |
-          echo "::error::Catastrophic failure: Found only ${{ steps.collate.outputs.files_found }} of 3 test artifacts."
+          echo "::error::Catastrophic failure: Found ${{ steps.collate.outputs.files_found }} artifacts, but expected ${{ steps.collate.outputs.files_expected }}."
           echo "### ⚠️ Catastrophic Failure" >> $GITHUB_STEP_SUMMARY
-          echo "Found only ${{ steps.collate.outputs.files_found }} of 3 test artifacts. Dumping logs and summaries:" >> $GITHUB_STEP_SUMMARY
+          echo "Found only ${{ steps.collate.outputs.files_found }} of ${{ steps.collate.outputs.files_expected }} expected artifacts. Dumping logs and summaries:" >> $GITHUB_STEP_SUMMARY
           
           cd artifacts
           for f in *.txt; do
@@ -124,20 +160,26 @@ jobs:
           exit 1
           
       - name: Compare Outputs
-        if: steps.collate.outputs.files_found == '3'
+        if: steps.collate.outputs.files_found == steps.collate.outputs.files_expected && steps.collate.outputs.files_found > 1
         run: |
-          echo "All 3 artifacts found. Running 3-way diff..."
+          echo "All ${{ steps.collate.outputs.files_found }} expected artifacts found. Running diffs..."
           cd artifacts
           DIFF_FOUND=0
           
-          echo "--- Comparing Ubuntu vs macOS ---"
-          diff -u ubuntu.txt macos.txt || { echo "::error::Ubuntu vs macOS outputs differ!"; DIFF_FOUND=1; }
+          if [[ -f ubuntu.txt && -f macos.txt ]]; then
+            echo "--- Comparing Ubuntu vs macOS ---"
+            diff -u ubuntu.txt macos.txt || { echo "::error::Ubuntu vs macOS outputs differ!"; DIFF_FOUND=1; }
+          fi
           
-          echo "--- Comparing macOS vs Windows ---"
-          diff -u macos.txt windows.txt || { echo "::error::macOS vs Windows outputs differ!"; DIFF_FOUND=1; }
+          if [[ -f macos.txt && -f windows.txt ]]; then
+            echo "--- Comparing macOS vs Windows ---"
+            diff -u macos.txt windows.txt || { echo "::error::macOS vs Windows outputs differ!"; DIFF_FOUND=1; }
+          fi
           
-          echo "--- Comparing Ubuntu vs Windows ---"
-          diff -u ubuntu.txt windows.txt || { echo "::error::Ubuntu vs Windows outputs differ!"; DIFF_FOUND=1; }
+          if [[ -f ubuntu.txt && -f windows.txt ]]; then
+            echo "--- Comparing Ubuntu vs Windows ---"
+            diff -u ubuntu.txt windows.txt || { echo "::error::Ubuntu vs Windows outputs differ!"; DIFF_FOUND=1; }
+          fi
           
           if [ $DIFF_FOUND -eq 1 ]; then
             echo "Differences found. See error annotations above."
@@ -147,3 +189,9 @@ jobs:
             echo "All outputs match."
             echo "### ✅ All tests passed and outputs match" >> $GITHUB_STEP_SUMMARY
           fi
+
+      - name: Report Single Run
+        if: steps.collate.outputs.files_found == steps.collate.outputs.files_expected && steps.collate.outputs.files_found <= 1
+        run: |
+          echo "Only one platform was run. No comparison possible."
+          echo "### ✅ Test passed on single platform" >> $GITHUB_STEP_SUMMARY

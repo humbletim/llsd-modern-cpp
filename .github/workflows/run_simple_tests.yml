@@ -1,0 +1,149 @@
+name: Run simple_test.cpp Matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_ubuntu:
+        description: 'Run on Ubuntu'
+        type: boolean
+        required: true
+        default: true
+      run_macos:
+        description: 'Run on macOS'
+        type: boolean
+        required: true
+        default: true
+      run_windows:
+        description: 'Run on Windows'
+        type: boolean
+        required: true
+        default: true
+
+jobs:
+  build_and_test:
+    name: Test on ${{ matrix.os }}
+    # This 'if' condition filters the matrix based on the workflow_dispatch inputs
+    if: ${{ (matrix.os == 'ubuntu-latest' && github.event.inputs.run_ubuntu) || (matrix.os == 'macos-latest' && github.event.inputs.run_macos) || (matrix.os == 'windows-latest' && github.event.inputs.run_windows) }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false # We want all 3 to run even if one fails
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compile on Linux/macOS
+        if: runner.os != 'Windows'
+        run: clang++ test.cpp -o test -isystem . -std=c++17
+        
+      - name: Setup MSVC on Windows
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msvc-dev@v1
+
+      - name: Compile on Windows
+        if: runner.os == 'Windows'
+        # /EHsc (exception handling), /std:c++17, /I. (include root), /Fet: (output file)
+        run: cl /EHsc /std:c++17 /I. test.cpp /Fet:test.exe
+        
+      - name: Run test (Linux/macOS)
+        if: runner.os != 'Windows'
+        # Capture both stdout and stderr (for the std::cerr from the test)
+        run: ./test > test-output.txt 2>&1
+
+      - name: Run test (Windows)
+        if: runner.os == 'Windows'
+        run: .\test.exe > test-output.txt 2>&1
+        
+      - name: Upload test output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output-${{ matrix.os }}
+          path: test-output.txt
+          
+  compare_results:
+    name: Compare All Test Outputs
+    runs-on: ubuntu-latest
+    needs: build_and_test
+    # We must run this 'always()' so we can implement the catastrophic failure check
+    if: always()
+
+    steps:
+      - name: Install Utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dos2unix
+          
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          
+      - name: Collate and Check Artifacts
+        id: collate
+        run: |
+          echo "Collating artifacts..."
+          cd artifacts
+          
+          # Use find to locate files in their subdirs and move/rename them
+          [ -f test-output-ubuntu-latest/test-output.txt ] && mv test-output-ubuntu-latest/test-output.txt ubuntu.txt && echo "Found Ubuntu artifact"
+          [ -f test-output-macos-latest/test-output.txt ] && mv test-output-macos-latest/test-output.txt macos.txt && echo "Found macOS artifact"
+          [ -f test-output-windows-latest/test-output.txt ] && mv test-output-windows-latest/test-output.txt windows.txt && echo "Found Windows artifact"
+
+          # Normalize Windows line endings
+          [ -f windows.txt ] && dos2unix windows.txt && echo "Normalized Windows EOL"
+
+          FILE_COUNT=0
+          [ -f ubuntu.txt ] && FILE_COUNT=$((FILE_COUNT+1))
+          [ -f macos.txt ] && FILE_COUNT=$((FILE_COUNT+1))
+          [ -f windows.txt ] && FILE_COUNT=$((FILE_COUNT+1))
+
+          echo "files_found=$FILE_COUNT" >> $GITHUB_OUTPUT
+          
+      - name: Catastrophic Failure Check
+        if: steps.collate.outputs.files_found != '3'
+        run: |
+          echo "::error::Catastrophic failure: Found only ${{ steps.collate.outputs.files_found }} of 3 test artifacts."
+          echo "### ⚠️ Catastrophic Failure" >> $GITHUB_STEP_SUMMARY
+          echo "Found only ${{ steps.collate.outputs.files_found }} of 3 test artifacts. Dumping logs and summaries:" >> $GITHUB_STEP_SUMMARY
+          
+          cd artifacts
+          for f in *.txt; do
+            if [ -f "$f" ]; then
+              PASS_COUNT=$(grep -c "PASS" "$f" || echo 0)
+              SUMMARY_LINE="* **$f**: $PASS_COUNT PASSING"
+              echo "$SUMMARY_LINE"
+              echo "$SUMMARY_LINE" >> $GITHUB_STEP_SUMMARY
+              
+              echo "--- START LOG: $f ---"
+              cat "$f"
+              echo "--- END LOG: $f ---"
+            fi
+          done
+          exit 1
+          
+      - name: Compare Outputs
+        if: steps.collate.outputs.files_found == '3'
+        run: |
+          echo "All 3 artifacts found. Running 3-way diff..."
+          cd artifacts
+          DIFF_FOUND=0
+          
+          echo "--- Comparing Ubuntu vs macOS ---"
+          diff -u ubuntu.txt macos.txt || { echo "::error::Ubuntu vs macOS outputs differ!"; DIFF_FOUND=1; }
+          
+          echo "--- Comparing macOS vs Windows ---"
+          diff -u macos.txt windows.txt || { echo "::error::macOS vs Windows outputs differ!"; DIFF_FOUND=1; }
+          
+          echo "--- Comparing Ubuntu vs Windows ---"
+          diff -u ubuntu.txt windows.txt || { echo "::error::Ubuntu vs Windows outputs differ!"; DIFF_FOUND=1; }
+          
+          if [ $DIFF_FOUND -eq 1 ]; then
+            echo "Differences found. See error annotations above."
+            echo "### ❌ Test outputs differed across platforms" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "All outputs match."
+            echo "### ✅ All tests passed and outputs match" >> $GITHUB_STEP_SUMMARY
+          fi
